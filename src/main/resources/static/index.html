@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>谐音梗生成器</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+        .fade-enter-active, .fade-leave-active { transition: opacity 0.5s ease; }
+        .fade-enter-from, .fade-leave-to { opacity: 0; }
+        .check-item { transition: all 0.2s; }
+        .check-item.active { background-color: #eff6ff; border-color: #3b82f6; }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-800 min-h-screen flex flex-col items-center py-10 px-4">
+
+<div id="app" class="w-full max-w-5xl space-y-8">
+
+    <div class="text-center space-y-2">
+        <h1 class="text-5xl font-black text-slate-900 tracking-tight">谐音梗<span class="text-blue-600">生成器</span></h1>
+        <p class="text-slate-500">帮你找到心仪的谐音梗</p>
+    </div>
+
+    <div class="bg-white p-6 sm:p-8 shadow-xl rounded-2xl border border-slate-100">
+        <form @submit.prevent="generate" class="space-y-8">
+
+            <div>
+                <input type="text" v-model="inputWord"
+                       class="block w-full text-center text-2xl font-bold border-0 border-b-2 border-slate-200 focus:border-blue-500 focus:ring-0 bg-transparent py-3 transition-colors placeholder-slate-300"
+                       placeholder="输入词语，如：行程、童杰、皇家">
+            </div>
+
+            <div v-if="categoryMap" class="space-y-6">
+
+                <div class="flex items-center justify-between border-b border-slate-100 pb-2">
+                    <span class="text-sm font-bold text-slate-600">语料库选择</span>
+                    <label class="flex items-center cursor-pointer text-sm text-blue-600 hover:text-blue-800">
+                        <input type="checkbox" class="mr-2 rounded text-blue-600 focus:ring-blue-500"
+                               :checked="isAllSelected"
+                               @change="toggleAll">
+                        {{ isAllSelected ? '取消全选' : '全选所有' }}
+                    </label>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                    <div v-for="(subTypes, groupName) in categoryMap" :key="groupName" class="space-y-3">
+                        <h3 class="font-bold text-slate-700 flex items-center">
+                            <span class="w-1 h-5 bg-blue-500 rounded-full mr-2"></span>
+                            {{ groupName }}
+                        </h3>
+                        <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                            <div v-for="type in subTypes" :key="type"
+                                 @click="toggleType(type)"
+                                 class="check-item cursor-pointer border rounded-md px-3 py-2 text-sm text-center select-none"
+                                 :class="selectedTypes.includes(type) ? 'active text-blue-700 font-medium' : 'border-slate-200 text-slate-600 hover:border-slate-300'">
+                                {{ type }}
+                                <span v-if="selectedTypes.includes(type)" class="ml-1 text-xs text-blue-400 bg-blue-50 px-1 rounded-full">
+                                        {{ selectedTypes.indexOf(type) + 1 }}
+                                    </span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div v-else class="text-center text-gray-400 py-4">正在加载语料库配置...</div>
+
+            <button type="submit" :disabled="!inputWord || selectedTypes.length === 0 || loading"
+                    class="w-full py-4 rounded-xl text-lg font-bold text-white bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed transition-all shadow-lg shadow-blue-200">
+                {{ loading ? '正在头脑风暴...' : '立即生成' }}
+            </button>
+        </form>
+    </div>
+
+    <transition name="fade">
+        <div v-if="results" class="space-y-6">
+            <div v-for="(items, category) in results" :key="category" v-show="items && items.length > 0"
+                 class="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
+                <div class="px-6 py-4 bg-slate-50 border-b border-slate-100 flex justify-between items-center">
+                    <h3 class="font-bold text-slate-800">{{ category }}</h3>
+                    <span class="text-xs text-slate-400 bg-white px-2 py-1 rounded border">匹配 {{ items.length }} 条</span>
+                </div>
+                <div class="p-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                    <div v-for="(item, index) in items" :key="index"
+                         class="group relative bg-white border border-slate-100 rounded-lg p-4 hover:border-blue-200 hover:shadow-md transition-all">
+
+                        <div class="text-lg font-bold text-slate-800 mb-1 group-hover:text-blue-600 transition-colors"
+                             v-html="parsePun(item).pun">
+                        </div>
+
+                        <div class="text-xs text-slate-400 truncate">
+                            {{ parsePun(item).origin }}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </transition>
+
+</div>
+
+<script>
+    const { createApp } = Vue;
+
+    createApp({
+        data() {
+            return {
+                inputWord: '',
+                loading: false,
+                categoryMap: null,
+                selectedTypes: [], // 默认不选
+                results: null,
+                allTypesList: [] // 扁平化存储所有类型，方便全选
+            }
+        },
+        computed: {
+            // 计算是否全选
+            isAllSelected() {
+                return this.allTypesList.length > 0 && this.selectedTypes.length === this.allTypesList.length;
+            }
+        },
+        mounted() {
+            this.fetchCategories();
+        },
+        methods: {
+            async fetchCategories() {
+                try {
+                    const res = await fetch('/pun/categories');
+                    this.categoryMap = await res.json();
+                    // 提取所有类型到扁平数组
+                    this.allTypesList = [];
+                    for (const group in this.categoryMap) {
+                        this.allTypesList.push(...this.categoryMap[group]);
+                    }
+                } catch (e) {
+                    console.error("加载分类失败", e);
+                }
+            },
+            toggleType(type) {
+                const idx = this.selectedTypes.indexOf(type);
+                if (idx > -1) {
+                    this.selectedTypes.splice(idx, 1);
+                } else {
+                    this.selectedTypes.push(type);
+                }
+            },
+            // 全选/反选逻辑
+            toggleAll() {
+                if (this.isAllSelected) {
+                    this.selectedTypes = [];
+                } else {
+                    this.selectedTypes = [...this.allTypesList];
+                }
+            },
+            async generate() {
+                if (!this.inputWord) return;
+                this.loading = true;
+                this.results = null;
+
+                try {
+                    const params = new URLSearchParams();
+                    params.append('word', this.inputWord);
+                    this.selectedTypes.forEach(t => params.append('types', t));
+
+                    const response = await fetch(`/pun/generate?${params.toString()}`);
+                    const data = await response.json();
+                    this.results = data;
+                } catch (error) {
+                    alert('生成失败');
+                } finally {
+                    this.loading = false;
+                }
+            },
+            parsePun(str) {
+                const match = str.match(/^(.*?)\s*(\(原词：.*?\))?$/);
+                return {
+                    pun: match ? match[1] : str,
+                    origin: match && match[2] ? match[2].replace(/[()]/g, '') : ''
+                };
+            }
+        }
+    }).mount('#app');
+</script>
+</body>
+</html>
