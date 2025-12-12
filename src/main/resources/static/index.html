@@ -3,18 +3,24 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>谐音梗生成器</title>
+    <title>谐音梗生成器 v0.0.2</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
-        .fade-enter-active, .fade-leave-active { transition: opacity 0.5s ease; }
+        .fade-enter-active, .fade-leave-active { transition: opacity 0.3s ease; }
         .fade-enter-from, .fade-leave-to { opacity: 0; }
+        /* 下拉菜单动画 */
+        .slide-enter-active, .slide-leave-active { transition: all 0.2s ease; }
+        .slide-enter-from, .slide-leave-to { opacity: 0; transform: translateY(-10px); }
         .check-item { transition: all 0.2s; }
         .check-item.active { background-color: #eff6ff; border-color: #3b82f6; }
+        /* 隐藏滚动条但允许滚动 */
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
     </style>
 </head>
-<body class="bg-slate-50 text-slate-800 min-h-screen flex flex-col items-center py-10 px-4">
+<body class="bg-slate-50 text-slate-800 min-h-screen flex flex-col items-center py-10 px-4" @click="closeDropdown">
 
 <div id="app" class="w-full max-w-5xl space-y-8">
 
@@ -23,8 +29,37 @@
         <p class="text-slate-500">帮你找到心仪的谐音梗</p>
     </div>
 
-    <div class="bg-white p-6 sm:p-8 shadow-xl rounded-2xl border border-slate-100">
-        <form @submit.prevent="generate" class="space-y-8">
+    <div class="bg-white p-6 sm:p-8 shadow-xl rounded-2xl border border-slate-100 relative">
+
+        <button @click.stop="toggleSettings"
+                class="absolute top-4 right-4 p-2 text-slate-400 hover:text-blue-600 hover:bg-slate-50 rounded-full transition-all z-20">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+        </button>
+
+        <transition name="slide">
+            <div v-if="showSettingsMenu" @click.stop
+                 class="absolute top-14 right-4 w-64 bg-white border border-slate-100 shadow-xl rounded-xl p-4 z-30">
+                <div class="space-y-4">
+                    <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider border-b border-slate-50 pb-2">生成设置</h3>
+
+                    <div class="flex items-center justify-between">
+                        <span class="text-sm font-medium text-slate-700">忽略字符顺序</span>
+
+                        <div class="relative cursor-pointer" @click="settings.ignoreOrder = !settings.ignoreOrder">
+                            <div class="w-11 h-6 rounded-full transition-colors duration-200 ease-in-out"
+                                 :class="settings.ignoreOrder ? 'bg-blue-600' : 'bg-slate-200'"></div>
+                            <div class="absolute left-1 top-1 w-4 h-4 bg-white rounded-full shadow-sm transition-transform duration-200 ease-in-out"
+                                 :class="settings.ignoreOrder ? 'translate-x-5' : 'translate-x-0'"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </transition>
+
+        <form @submit.prevent="generate" class="space-y-8 mt-4">
 
             <div>
                 <input type="text" v-model="inputWord"
@@ -33,7 +68,6 @@
             </div>
 
             <div v-if="categoryMap" class="space-y-6">
-
                 <div class="flex items-center justify-between border-b border-slate-100 pb-2">
                     <span class="text-sm font-bold text-slate-600">语料库选择</span>
                     <label class="flex items-center cursor-pointer text-sm text-blue-600 hover:text-blue-800">
@@ -74,7 +108,7 @@
     </div>
 
     <transition name="fade">
-        <div v-if="results" class="space-y-6">
+        <div v-if="results" id="results-container" class="space-y-6">
             <div v-for="(items, category) in results" :key="category" v-show="items && items.length > 0"
                  class="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
                 <div class="px-6 py-4 bg-slate-50 border-b border-slate-100 flex justify-between items-center">
@@ -84,13 +118,11 @@
                 <div class="p-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                     <div v-for="(item, index) in items" :key="index"
                          class="group relative bg-white border border-slate-100 rounded-lg p-4 hover:border-blue-200 hover:shadow-md transition-all">
-
-                        <div class="text-lg font-bold text-slate-800 mb-1 group-hover:text-blue-600 transition-colors"
-                             v-html="parsePun(item).pun">
+                        <div class="text-lg text-slate-800 mb-1 group-hover:text-blue-600 transition-colors"
+                             v-html="renderPun(item)">
                         </div>
-
                         <div class="text-xs text-slate-400 truncate">
-                            {{ parsePun(item).origin }}
+                            原词：{{ item.origins.join('、') }}
                         </div>
                     </div>
                 </div>
@@ -101,7 +133,7 @@
 </div>
 
 <script>
-    const { createApp } = Vue;
+    const { createApp, nextTick } = Vue;
 
     createApp({
         data() {
@@ -109,32 +141,49 @@
                 inputWord: '',
                 loading: false,
                 categoryMap: null,
-                selectedTypes: [], // 默认不选
+                selectedTypes: [],
                 results: null,
-                allTypesList: [] // 扁平化存储所有类型，方便全选
+                allTypesList: [],
+                showSettingsMenu: false, // 控制菜单显示
+                settings: {
+                    ignoreOrder: true
+                }
             }
         },
         computed: {
-            // 计算是否全选
             isAllSelected() {
                 return this.allTypesList.length > 0 && this.selectedTypes.length === this.allTypesList.length;
             }
         },
         mounted() {
             this.fetchCategories();
+            // 点击外部关闭菜单
+            document.addEventListener('click', this.closeDropdown);
+        },
+        beforeUnmount() {
+            document.removeEventListener('click', this.closeDropdown);
         },
         methods: {
+            toggleSettings() {
+                this.showSettingsMenu = !this.showSettingsMenu;
+            },
+            closeDropdown(e) {
+                // 点击页面其他地方时关闭菜单
+                this.showSettingsMenu = false;
+            },
             async fetchCategories() {
                 try {
-                    const res = await fetch('/pun/categories');
-                    this.categoryMap = await res.json();
-                    // 提取所有类型到扁平数组
-                    this.allTypesList = [];
-                    for (const group in this.categoryMap) {
-                        this.allTypesList.push(...this.categoryMap[group]);
-                    }
+                    const mapRes = await fetch('/pun/categories');
+                    this.categoryMap = await mapRes.json();
+
+                    const listRes = await fetch('/pun/types-ordered');
+                    this.allTypesList = await listRes.json();
+
+                    const defaultRes = await fetch('/pun/types-default');
+                    const defaultList = await defaultRes.json();
+                    this.selectedTypes = defaultList.filter(t => this.allTypesList.includes(t));
                 } catch (e) {
-                    console.error("加载分类失败", e);
+                    console.error("加载失败", e);
                 }
             },
             toggleType(type) {
@@ -145,7 +194,6 @@
                     this.selectedTypes.push(type);
                 }
             },
-            // 全选/反选逻辑
             toggleAll() {
                 if (this.isAllSelected) {
                     this.selectedTypes = [];
@@ -162,22 +210,40 @@
                     const params = new URLSearchParams();
                     params.append('word', this.inputWord);
                     this.selectedTypes.forEach(t => params.append('types', t));
+                    params.append('ignoreOrder', this.settings.ignoreOrder);
 
                     const response = await fetch(`/pun/generate?${params.toString()}`);
                     const data = await response.json();
+
                     this.results = data;
+
+                    nextTick(() => {
+                        const element = document.getElementById('results-container');
+                        if (element) {
+                            element.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                        }
+                    });
+
                 } catch (error) {
+                    console.error(error);
                     alert('生成失败');
                 } finally {
                     this.loading = false;
                 }
             },
-            parsePun(str) {
-                const match = str.match(/^(.*?)\s*(\(原词：.*?\))?$/);
-                return {
-                    pun: match ? match[1] : str,
-                    origin: match && match[2] ? match[2].replace(/[()]/g, '') : ''
-                };
+            renderPun(item) {
+                const text = item.pun;
+                const indices = item.highlights || [];
+                let html = '';
+                for (let i = 0; i < text.length; i++) {
+                    const char = text[i];
+                    if (indices.includes(i)) {
+                        html += `<span class="text-red-500 font-bold text-xl">${char}</span>`;
+                    } else {
+                        html += char;
+                    }
+                }
+                return html;
             }
         }
     }).mount('#app');
