@@ -1,0 +1,75 @@
+server:
+  port: 8080
+
+pun:
+  search-order:
+    - "成语"
+    - "诗歌"
+    - "歇后语"
+    - "成语俗语"
+    - "词语"
+
+  defaultDictNames:
+    - "成语"
+    - "诗歌"
+    - "歇后语"
+    - "成语俗语"
+    - "词语"
+
+  groups:
+
+    # 可以在此调整顺序
+    - name: "THUOCL中文词库"
+      dicts:
+        - name: "成语"
+          path: "thuocl/THUOCL_chengyu.txt"
+          loader-type: THUOCL
+        - name: "诗歌"
+          path: "thuocl/THUOCL_poem.txt"
+          loader-type: THUOCL
+        - name: "地名"
+          path: "thuocl/THUOCL_diming.txt"
+          loader-type: THUOCL
+        - name: "动物"
+          path: "thuocl/THUOCL_animal.txt"
+          loader-type: THUOCL
+        - name: "饮食"
+          path: "thuocl/THUOCL_food.txt"
+          loader-type: THUOCL
+        - name: "汽车"
+          path: "thuocl/THUOCL_car.txt"
+          loader-type: THUOCL
+        - name: "IT互联网"
+          path: "thuocl/THUOCL_it.txt"
+          loader-type: THUOCL
+        - name: "财经"
+          path: "thuocl/THUOCL_caijing.txt"
+          loader-type: THUOCL
+        - name: "法律"
+          path: "thuocl/THUOCL_law.txt"
+          loader-type: THUOCL
+        - name: "历史名人"
+          path: "thuocl/THUOCL_lishimingren.txt"
+          loader-type: THUOCL
+        - name: "医学"
+          path: "thuocl/THUOCL_medical.txt"
+          loader-type: THUOCL
+
+    - name: "新华字典数据库"
+      dicts:
+        - name: "歇后语"
+          path: "xinhua/xiehouyu.json"
+          loader-type: JSON_XIEHOUYU
+          default-freq: 100
+        - name: "成语俗语"
+          path: "xinhua/idiom.json"
+          loader-type: JSON_NORMAL
+          key-field: "word"
+          extra-field: "explanation"
+          default-freq: 500
+        - name: "词语"
+          path: "xinhua/ci.json"
+          loader-type: JSON_NORMAL
+          key-field: "ci"
+          extra-field: "explanation"
+          default-freq: 100

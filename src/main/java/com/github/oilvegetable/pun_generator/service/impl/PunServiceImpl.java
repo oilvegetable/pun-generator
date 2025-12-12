@@ -6,8 +6,13 @@ import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONArray;
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
+import com.github.oilvegetable.pun_generator.config.PunProperties;
+import com.github.oilvegetable.pun_generator.vo.PunResult;
 import com.github.oilvegetable.pun_generator.service.PunService;
+import lombok.AllArgsConstructor;
+import lombok.Data;
 import net.sourceforge.pinyin4j.PinyinHelper;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import jakarta.annotation.PostConstruct;
@@ -17,50 +22,45 @@ import java.util.stream.Collectors;
 @Service
 public class PunServiceImpl implements PunService {
 
-    public static final String GROUP_XINHUA = "新华字典数据库";
-    public static final String GROUP_THUOCL = "THUOCL中文词库";
+    @Autowired
+    private PunProperties punProperties;
 
     private final Map<String, List<String>> categoryMap = new LinkedHashMap<>();
     private final Map<String, Set<DictItem>> invertedIndex = new HashMap<>();
-    private final Set<String> allTypes = new HashSet<>();
+    private final Set<String> allTypes = new LinkedHashSet<>();
+    private final Map<String, Integer> typePriorityMap = new HashMap<>();
 
+    @Data
+    @AllArgsConstructor
     private static class DictItem {
-        String text;    // 用于匹配的文本 (歇后语仅存answer)
+        String text;
         String type;
-        String extra;   // 歇后语存riddle
+        String extra;
         int frequency;
         List<String> pinyins;
-
-        public DictItem(String text, String type, String extra, int frequency, List<String> pinyins) {
-            this.text = text;
-            this.type = type;
-            this.extra = extra;
-            this.frequency = frequency;
-            this.pinyins = pinyins;
-        }
     }
 
+    @Data
+    @AllArgsConstructor
     private static class MatchResult {
-        String finalPun; // 仅仅是匹配部分的梗 (不含歇后语前半句)
+        String finalPun;
         int score;
-        public MatchResult(String finalPun, int score) {
-            this.finalPun = finalPun;
-            this.score = score;
-        }
+        List<Integer> indices;
     }
 
+    @Data
     private static class MergedResult {
-        String finalPun;    // 完整的梗 (含高亮标签)
+        String finalPun;
+        List<Integer> indices;
         int maxScore;
         int maxFrequency;
-        String type;
         Set<String> originTexts = new LinkedHashSet<>();
 
-        public MergedResult(String finalPun, int score, int frequency, String originText, String type) {
+        public MergedResult(String finalPun, List<Integer> indices, int score, int frequency, String originText) {
             this.finalPun = finalPun;
+            this.indices = indices;
             this.maxScore = score;
             this.maxFrequency = frequency;
-            this.type = type;
             this.originTexts.add(originText);
         }
 
@@ -70,38 +70,55 @@ public class PunServiceImpl implements PunService {
             this.maxFrequency = Math.max(this.maxFrequency, frequency);
         }
 
-        public String getDisplayString() {
-            // 直接返回构造好的带标签的字符串，配合原词
-            // 前端需要用 v-html 解析
-            return finalPun + " (原词：" + String.join("、", originTexts) + ")";
+        public PunResult toPunResult() {
+            return new PunResult(this.finalPun, this.originTexts, this.indices);
         }
     }
 
     @PostConstruct
+    @Override
     public void initData() {
-        System.out.println("正在构建全量倒排索引...");
-        categoryMap.put(GROUP_XINHUA, new ArrayList<>());
-        categoryMap.put(GROUP_THUOCL, new ArrayList<>());
+        System.out.println("正在根据配置文件构建索引...");
 
-        // 加载新华字典
-        loadJsonData("idiom.json", "成语俗语", "word", "explanation", 500, GROUP_XINHUA);
-        loadJsonData("xiehouyu.json", "歇后语", "answer", "riddle", 100, GROUP_XINHUA);
-        loadJsonData("ci.json", "词语", "ci", "explanation", 100, GROUP_XINHUA);
+        if (punProperties.getGroups() == null) {
+            System.err.println("未找到词库配置");
+            return;
+        }
 
-        // 加载 THUOCL
-        loadThuoclData("thuocl/THUOCL_animal.txt", "动物", GROUP_THUOCL);
-        loadThuoclData("thuocl/THUOCL_caijing.txt", "财经", GROUP_THUOCL);
-        loadThuoclData("thuocl/THUOCL_car.txt", "汽车", GROUP_THUOCL);
-        loadThuoclData("thuocl/THUOCL_chengyu.txt", "成语(THU)", GROUP_THUOCL);
-        loadThuoclData("thuocl/THUOCL_diming.txt", "地名", GROUP_THUOCL);
-        loadThuoclData("thuocl/THUOCL_food.txt", "饮食", GROUP_THUOCL);
-        loadThuoclData("thuocl/THUOCL_it.txt", "IT互联网", GROUP_THUOCL);
-        loadThuoclData("thuocl/THUOCL_law.txt", "法律", GROUP_THUOCL);
-        loadThuoclData("thuocl/THUOCL_lishimingren.txt", "历史名人", GROUP_THUOCL);
-        loadThuoclData("thuocl/THUOCL_medical.txt", "医学", GROUP_THUOCL);
-        loadThuoclData("thuocl/THUOCL_poem.txt", "诗歌", GROUP_THUOCL);
+        // 1. 清理数据
+        categoryMap.clear();
+        invertedIndex.clear();
+        allTypes.clear();
+        typePriorityMap.clear();
 
-        System.out.println("索引构建完毕");
+        // 2. 初始化优先级映射
+        // 如果配置文件里配了 search-order，就用配置的；否则默认优先级为 MAX_VALUE (排在最后)
+        List<String> orderConfig = punProperties.getSearchOrder();
+        if (orderConfig != null) {
+            for (int i = 0; i < orderConfig.size(); i++) {
+                typePriorityMap.put(orderConfig.get(i), i);
+            }
+        }
+
+        // 3. 加载词库
+        for (PunProperties.GroupConfig group : punProperties.getGroups()) {
+            categoryMap.put(group.getName(), new ArrayList<>());
+            if (group.getDicts() == null) continue;
+
+            for (PunProperties.DictConfig dict : group.getDicts()) {
+                System.out.println("加载: " + dict.getName());
+                categoryMap.get(group.getName()).add(dict.getName());
+                allTypes.add(dict.getName());
+
+                if (dict.getLoaderType() == null) continue;
+                switch (dict.getLoaderType()) {
+                    case JSON_NORMAL: loadJsonNormal(dict); break;
+                    case JSON_XIEHOUYU: loadJsonXiehouyu(dict); break;
+                    case THUOCL: loadThuoclData(dict); break;
+                }
+            }
+        }
+        System.out.println("初始化完成，共 " + allTypes.size() + " 个分类");
     }
 
     @Override
@@ -110,9 +127,28 @@ public class PunServiceImpl implements PunService {
     }
 
     @Override
-    public Map<String, List<String>> generatePun(String inputWord, List<String> targetTypes) {
-        Map<String, List<String>> resultMap = new LinkedHashMap<>();
-        List<String> searchTypes = (targetTypes == null || targetTypes.isEmpty()) ? new ArrayList<>(allTypes) : targetTypes;
+    public List<String> getAllTypesOrdered() {
+        // 复制一份所有类型
+        List<String> sortedTypes = new ArrayList<>(allTypes);
+        // 按照 typePriorityMap 进行排序
+        sortedTypes.sort(Comparator.comparingInt(t -> typePriorityMap.getOrDefault(t, Integer.MAX_VALUE)));
+        return sortedTypes;
+    }
+
+    @Override
+    public List<String> getDefaultSelectedTypes() {
+        return punProperties.getDefaultDictNames() != null ? punProperties.getDefaultDictNames() : new ArrayList<>();
+    }
+
+    @Override
+    public Map<String, List<PunResult>> generatePun(String inputWord, List<String> targetTypes, boolean ignoreOrder) {
+        Map<String, List<PunResult>> resultMap = new LinkedHashMap<>();
+        List<String> searchTypes = (targetTypes == null || targetTypes.isEmpty())
+                ? new ArrayList<>(allTypes)
+                : new ArrayList<>(targetTypes);
+
+        // 规则：配置了优先级的按配置走，没配置的按默认顺序排在后面
+        searchTypes.sort(Comparator.comparingInt(t -> typePriorityMap.getOrDefault(t, Integer.MAX_VALUE)));
 
         for (String type : searchTypes) {
             resultMap.putIfAbsent(type, new ArrayList<>());
@@ -128,40 +164,46 @@ public class PunServiceImpl implements PunService {
             if (invertedIndex.containsKey(py)) {
                 Set<DictItem> items = invertedIndex.get(py);
                 for (DictItem item : items) {
-                    if (resultMap.containsKey(item.type)) {
+                    if (resultMap.containsKey(item.getType())) { // 注意：Lombok生成的Getter是 getType()
                         candidates.add(item);
                     }
                 }
             }
         }
 
+        // 2. 细算
         Map<String, Map<String, MergedResult>> tempGroupedMap = new HashMap<>();
         for (String type : searchTypes) {
             tempGroupedMap.put(type, new HashMap<>());
         }
 
-        // 2. 细算
         for (DictItem item : candidates) {
-            MatchResult match = calculateBestMatch(inputWord, inputPinyins, item);
+            MatchResult match;
+            if (ignoreOrder) {
+                match = calculateUnorderedMatch(inputWord, inputPinyins, item);
+            } else {
+                match = calculateOrderedMatch(inputWord, inputPinyins, item);
+            }
+
             if (match != null) {
-                Map<String, MergedResult> group = tempGroupedMap.get(item.type);
+                Map<String, MergedResult> group = tempGroupedMap.get(item.getType());
                 if (group != null) {
+                    String fullPunDisplay = match.getFinalPun();
+                    String fullOriginText = item.getText();
+                    List<Integer> finalIndices = new ArrayList<>(match.getIndices());
 
-                    // 构造完整的展示字符串
-                    String fullPunDisplay = match.finalPun;
-                    String fullOriginText = item.text;
-
-                    // 如果是歇后语，把前半句(riddle)拼回去
-                    if ("歇后语".equals(item.type) && StrUtil.isNotBlank(item.extra)) {
-                        // 格式：猪八戒照镜子——里外不<span...>茉莉</span>
-                        fullPunDisplay = item.extra + "——" + match.finalPun;
-                        fullOriginText = item.extra + "——" + item.text;
+                    if ("歇后语".equals(item.getType()) && StrUtil.isNotBlank(item.getExtra())) {
+                        String prefix = item.getExtra() + "——";
+                        fullPunDisplay = prefix + match.getFinalPun();
+                        fullOriginText = prefix + item.getText();
+                        int offset = prefix.length();
+                        finalIndices.replaceAll(i -> i + offset);
                     }
 
                     if (group.containsKey(fullPunDisplay)) {
-                        group.get(fullPunDisplay).addOrigin(fullOriginText, match.score, item.frequency);
+                        group.get(fullPunDisplay).addOrigin(fullOriginText, match.getScore(), item.getFrequency());
                     } else {
-                        group.put(fullPunDisplay, new MergedResult(fullPunDisplay, match.score, item.frequency, fullOriginText, item.type));
+                        group.put(fullPunDisplay, new MergedResult(fullPunDisplay, finalIndices, match.getScore(), item.getFrequency(), fullOriginText));
                     }
                 }
             }
@@ -171,152 +213,169 @@ public class PunServiceImpl implements PunService {
         for (String type : searchTypes) {
             Map<String, MergedResult> punMap = tempGroupedMap.get(type);
             if (punMap == null || punMap.isEmpty()) continue;
+
             List<MergedResult> list = new ArrayList<>(punMap.values());
             list.sort((r1, r2) -> {
-                if (Math.abs(r1.maxScore - r2.maxScore) > 15) return r2.maxScore - r1.maxScore;
-                return r2.maxFrequency - r1.maxFrequency;
+                if (Math.abs(r1.getMaxScore() - r2.getMaxScore()) > 15) return r2.getMaxScore() - r1.getMaxScore();
+                return r2.getMaxFrequency() - r1.getMaxFrequency();
             });
-            List<String> sortedStrings = list.stream().limit(20).map(MergedResult::getDisplayString).collect(Collectors.toList());
-            resultMap.put(type, sortedStrings);
+
+            List<PunResult> resultList = list.stream().limit(20)
+                    .map(MergedResult::toPunResult)
+                    .collect(Collectors.toList());
+            resultMap.put(type, resultList);
         }
         return resultMap;
     }
 
-    private void loadJsonData(String fileName, String type, String keyField, String extraField, int defaultFreq, String groupName) {
+    private void loadJsonNormal(PunProperties.DictConfig config) {
         try {
-            allTypes.add(type);
-            categoryMap.get(groupName).add(type);
-            String jsonStr = ResourceUtil.readUtf8Str(fileName);
+            String jsonStr = ResourceUtil.readUtf8Str(config.getPath());
             if (jsonStr == null) return;
             JSONArray array = JSONUtil.parseArray(jsonStr);
             for (Object obj : array) {
                 JSONObject json = (JSONObject) obj;
-
-                String text = "";
-                String extra = json.getStr(extraField);
-
-                // 【核心修改】歇后语：text只存answer，extra存riddle
-                if ("歇后语".equals(type)) {
-                    String riddle = json.getStr("riddle");
-                    String answer = json.getStr("answer");
-                    if (StrUtil.isBlank(riddle) || StrUtil.isBlank(answer)) continue;
-                    text = answer; // 只匹配后半句
-                    extra = riddle; // 存前半句
-                } else {
-                    text = json.getStr(keyField);
-                }
-
-                if (text == null || text.trim().isEmpty()) continue;
-                List<String> pinyins = getStringPinyins(text);
-                if (pinyins.isEmpty()) continue;
-                DictItem item = new DictItem(text, type, extra, defaultFreq, pinyins);
-                for (String py : pinyins) {
-                    invertedIndex.computeIfAbsent(py, k -> new HashSet<>()).add(item);
+                String text = json.getStr(config.getKeyField());
+                String extra = config.getExtraField() != null ? json.getStr(config.getExtraField()) : "";
+                if (text != null && !text.trim().isEmpty()) {
+                    addToIndex(text, config.getName(), extra, config.getDefaultFreq());
                 }
             }
-        } catch (Exception e) { e.printStackTrace(); }
+        } catch (Exception e) { System.err.println("Load Error: " + config.getPath()); }
     }
 
-    private void loadThuoclData(String filePath, String type, String groupName) {
+    private void loadJsonXiehouyu(PunProperties.DictConfig config) {
         try {
-            allTypes.add(type);
-            categoryMap.get(groupName).add(type);
-            String content = ResourceUtil.readUtf8Str(filePath);
+            String jsonStr = ResourceUtil.readUtf8Str(config.getPath());
+            JSONArray array = JSONUtil.parseArray(jsonStr);
+            for (Object obj : array) {
+                JSONObject json = (JSONObject) obj;
+                String riddle = json.getStr("riddle");
+                String answer = json.getStr("answer");
+                if (StrUtil.isNotBlank(riddle) && StrUtil.isNotBlank(answer)) {
+                    addToIndex(answer, config.getName(), riddle, config.getDefaultFreq());
+                }
+            }
+        } catch (Exception e) { System.err.println("Load Error: " + config.getPath()); }
+    }
+
+    private void loadThuoclData(PunProperties.DictConfig config) {
+        try {
+            String content = ResourceUtil.readUtf8Str(config.getPath());
             if (content == null) return;
             List<String> lines = StrSplitter.split(content, '\n', true, true);
             for (String line : lines) {
                 List<String> parts = StrSplitter.split(line, "\t", true, true);
                 if (parts.size() < 2) continue;
                 String text = parts.get(0);
-                String freqStr = parts.get(1);
                 if (text.length() < 2) continue;
-                int frequency = 0;
-                try { frequency = Integer.parseInt(freqStr); } catch (NumberFormatException e) { continue; }
-                List<String> pinyins = getStringPinyins(text);
-                if (pinyins.isEmpty()) continue;
-                DictItem item = new DictItem(text, type, "", frequency, pinyins);
-                for (String py : pinyins) {
-                    invertedIndex.computeIfAbsent(py, k -> new HashSet<>()).add(item);
-                }
+                try {
+                    int frequency = Integer.parseInt(parts.get(1));
+                    addToIndex(text, config.getName(), "", frequency);
+                } catch (NumberFormatException e) { /* ignore */ }
             }
-        } catch (Exception e) {}
+        } catch (Exception e) { System.err.println("Load Error: " + config.getPath()); }
     }
 
-    private MatchResult calculateBestMatch(String inputWord, List<String> inputPinyins, DictItem item) {
-        List<String> idiomPinyins = item.pinyins;
+    private void addToIndex(String text, String type, String extra, int frequency) {
+        List<String> pinyins = getStringPinyins(text);
+        if (pinyins.isEmpty()) return;
+        DictItem item = new DictItem(text, type, extra, frequency, pinyins);
+        for (String py : pinyins) {
+            invertedIndex.computeIfAbsent(py, k -> new HashSet<>()).add(item);
+        }
+    }
+
+    // 有序匹配
+    private MatchResult calculateOrderedMatch(String inputWord, List<String> inputPinyins, DictItem item) {
+        List<String> idiomPinyins = item.getPinyins();
         if (idiomPinyins.size() < inputPinyins.size()) return null;
+
         int bestScore = -1;
         List<Integer> bestIndices = null;
         List<Integer> startPositions = new ArrayList<>();
+
         String firstPy = inputPinyins.get(0);
         for (int i = 0; i < idiomPinyins.size(); i++) {
             if (idiomPinyins.get(i).equals(firstPy)) startPositions.add(i);
         }
+
         for (int startIdx : startPositions) {
             List<Integer> currentIndices = new ArrayList<>();
             currentIndices.add(startIdx);
             int currentIdiomSearchIdx = startIdx + 1;
             boolean possible = true;
             int currentScore = 10;
+
             for (int k = 1; k < inputPinyins.size(); k++) {
                 String targetPy = inputPinyins.get(k);
                 int foundAt = -1;
                 for (int m = currentIdiomSearchIdx; m < idiomPinyins.size(); m++) {
                     if (idiomPinyins.get(m).equals(targetPy)) {
-                        foundAt = m;
-                        break;
+                        foundAt = m; break;
                     }
                 }
                 if (foundAt != -1) {
                     currentIndices.add(foundAt);
                     currentScore += 10;
-                    int lastIdx = currentIndices.get(currentIndices.size() - 2);
-                    if (foundAt == lastIdx + 1) currentScore += 20;
+                    if (foundAt == currentIndices.get(currentIndices.size() - 2) + 1) currentScore += 20;
                     currentIdiomSearchIdx = foundAt + 1;
                 } else {
-                    possible = false;
+                    possible = false; break;
+                }
+            }
+            if (possible && currentScore > bestScore) {
+                bestScore = currentScore;
+                bestIndices = new ArrayList<>(currentIndices);
+            }
+        }
+
+        if (bestIndices == null) return null;
+        String finalPun = constructPlainString(inputWord, item.getText(), bestIndices);
+        return new MatchResult(finalPun, bestScore, bestIndices);
+    }
+
+    // 无序匹配
+    private MatchResult calculateUnorderedMatch(String inputWord, List<String> inputPinyins, DictItem item) {
+        List<String> idiomPinyins = item.getPinyins();
+        if (idiomPinyins.size() < inputPinyins.size()) return null;
+
+        List<Integer> resultIndices = new ArrayList<>();
+        // 使用一个标记数组，防止同一个位置被重复使用
+        boolean[] used = new boolean[idiomPinyins.size()];
+        int score = 0;
+
+        // 贪心匹配：为每一个输入拼音找到第一个未使用的匹配项
+        for (String inputPy : inputPinyins) {
+            int foundAt = -1;
+            for (int i = 0; i < idiomPinyins.size(); i++) {
+                if (!used[i] && idiomPinyins.get(i).equals(inputPy)) {
+                    foundAt = i;
                     break;
                 }
             }
-            if (possible) {
-                if (currentScore > bestScore) {
-                    bestScore = currentScore;
-                    bestIndices = new ArrayList<>(currentIndices);
-                }
+
+            if (foundAt != -1) {
+                used[foundAt] = true;
+                resultIndices.add(foundAt);
+                score += 10; // 基础分
+            } else {
+                // 如果有一个拼音找不到，说明无法构成谐音，直接失败
+                return null;
             }
         }
-        if (bestIndices == null) return null;
-        String finalPun = constructPunString(inputWord, item.text, bestIndices);
-        return new MatchResult(finalPun, bestScore);
+
+        // 构造结果
+        String finalPun = constructPlainString(inputWord, item.getText(), resultIndices);
+        return new MatchResult(finalPun, score, resultIndices);
     }
 
-    /**
-     * 构造高亮字符串
-     * 返回格式示例：黄发<span class="text-red-500 font-bold">台</span><span class="text-red-500 font-bold">北</span>
-     */
-    private String constructPunString(String inputWord, String itemText, List<Integer> indices) {
-        StringBuilder sb = new StringBuilder();
-        Set<Integer> replaceSet = new HashSet<>(indices);
-        Map<Integer, Character> indexToInputChar = new HashMap<>();
+
+    private String constructPlainString(String inputWord, String itemText, List<Integer> indices) {
+        StringBuilder sb = new StringBuilder(itemText);
         for (int k = 0; k < indices.size(); k++) {
             if (k < inputWord.length()) {
-                indexToInputChar.put(indices.get(k), inputWord.charAt(k));
-            }
-        }
-
-        // 定义高亮样式的开始和结束标签
-        // 使用 text-red-500 (Tailwind红色) 和 font-bold (加粗)
-        String highlightStart = "<span class=\"text-red-500 font-bold\">";
-        String highlightEnd = "</span>";
-
-        for (int i = 0; i < itemText.length(); i++) {
-            if (replaceSet.contains(i)) {
-                // 如果是替换字，包裹标签
-                sb.append(highlightStart);
-                sb.append(indexToInputChar.get(i));
-                sb.append(highlightEnd);
-            } else {
-                sb.append(itemText.charAt(i));
+                sb.setCharAt(indices.get(k), inputWord.charAt(k));
             }
         }
         return sb.toString();
@@ -325,19 +384,10 @@ public class PunServiceImpl implements PunService {
     private List<String> getStringPinyins(String str) {
         List<String> list = new ArrayList<>();
         for (char c : str.toCharArray()) {
-            String py = getCharPinyin(c);
-            if (py != null) list.add(py);
+            String[] pinyins = null;
+            try { pinyins = PinyinHelper.toHanyuPinyinStringArray(c); } catch (Exception e) {}
+            if (pinyins != null && pinyins.length > 0) list.add(pinyins[0].replaceAll("\\d", ""));
         }
         return list;
-    }
-
-    private String getCharPinyin(char c) {
-        try {
-            String[] pinyins = PinyinHelper.toHanyuPinyinStringArray(c);
-            if (pinyins != null && pinyins.length > 0) {
-                return pinyins[0].replaceAll("\\d", "");
-            }
-        } catch (Exception e) {}
-        return null;
     }
 }
