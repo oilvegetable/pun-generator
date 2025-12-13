@@ -221,7 +221,7 @@ public class PunServiceImpl implements PunService {
                 return r2.getMaxFrequency() - r1.getMaxFrequency();
             });
 
-            List<PunResult> resultList = list.stream().limit(20)
+            List<PunResult> resultList = list.stream()
                     .map(MergedResult::toPunResult)
                     .collect(Collectors.toList());
             resultMap.put(type, resultList);

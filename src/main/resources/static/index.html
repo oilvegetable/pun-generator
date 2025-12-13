@@ -109,14 +109,22 @@
 
     <transition name="fade">
         <div v-if="results" id="results-container" class="space-y-6">
-            <div v-for="(items, category) in results" :key="category" v-show="items && items.length > 0"
+            <div v-for="(allHeaderItems, category) in results" :key="category" v-show="allHeaderItems && allHeaderItems.length > 0"
                  class="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
+
                 <div class="px-6 py-4 bg-slate-50 border-b border-slate-100 flex justify-between items-center">
                     <h3 class="font-bold text-slate-800">{{ category }}</h3>
-                    <span class="text-xs text-slate-400 bg-white px-2 py-1 rounded border">匹配 {{ items.length }} 条</span>
+                    <div class="space-x-2 text-xs">
+                        <span class="text-blue-600 font-bold">
+                            展示 {{ Math.min(limitMap[category], allHeaderItems.length) }}
+                        </span>
+                        <span class="text-slate-400">/</span>
+                        <span class="text-slate-500">共 {{ allHeaderItems.length }} 条</span>
+                    </div>
                 </div>
+
                 <div class="p-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                    <div v-for="(item, index) in items" :key="index"
+                    <div v-for="(item, index) in allHeaderItems.slice(0, limitMap[category])" :key="index"
                          class="group relative bg-white border border-slate-100 rounded-lg p-4 hover:border-blue-200 hover:shadow-md transition-all">
                         <div class="text-lg text-slate-800 mb-1 group-hover:text-blue-600 transition-colors"
                              v-html="renderPun(item)">
@@ -125,6 +133,14 @@
                             原词：{{ item.origins.join('、') }}
                         </div>
                     </div>
+                </div>
+
+                <div v-if="allHeaderItems.length > limitMap[category]"
+                     class="px-6 py-4 bg-slate-50 border-t border-slate-100 text-center cursor-pointer hover:bg-slate-100 transition-colors"
+                     @click="loadMore(category)">
+                    <span class="text-sm font-bold text-blue-600">
+                        查看更多 (剩余 {{ allHeaderItems.length - limitMap[category] }} 条) ▼
+                    </span>
                 </div>
             </div>
         </div>
@@ -147,7 +163,13 @@
                 showSettingsMenu: false, // 控制菜单显示
                 settings: {
                     ignoreOrder: true
-                }
+                },
+                uiConfig: {
+                    initial: 20,
+                    step: 40
+                },
+                // 记录每个分类当前的展示上限
+                limitMap: {}
             }
         },
         computed: {
@@ -157,6 +179,7 @@
         },
         mounted() {
             this.fetchCategories();
+            this.fetchUiConfig();
             // 点击外部关闭菜单
             document.addEventListener('click', this.closeDropdown);
         },
@@ -170,6 +193,16 @@
             closeDropdown(e) {
                 // 点击页面其他地方时关闭菜单
                 this.showSettingsMenu = false;
+            },
+            async fetchUiConfig() {
+                try {
+                    const res = await fetch('/pun/config');
+                    if(res.ok) {
+                        const data = await res.json();
+                        this.uiConfig.initial = data.initial;
+                        this.uiConfig.step = data.step;
+                    }
+                } catch (e) { console.log("使用默认UI配置"); }
             },
             async fetchCategories() {
                 try {
@@ -201,10 +234,16 @@
                     this.selectedTypes = [...this.allTypesList];
                 }
             },
+            loadMore(category) {
+                if (this.limitMap[category]) {
+                    this.limitMap[category] += this.uiConfig.step;
+                }
+            },
             async generate() {
                 if (!this.inputWord) return;
                 this.loading = true;
                 this.results = null;
+                this.limitMap = {};
 
                 try {
                     const params = new URLSearchParams();
@@ -216,6 +255,10 @@
                     const data = await response.json();
 
                     this.results = data;
+
+                    for (const key in data) {
+                        this.limitMap[key] = this.uiConfig.initial;
+                    }
 
                     nextTick(() => {
                         const element = document.getElementById('results-container');

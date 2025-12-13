@@ -20,6 +20,12 @@ public class PunProperties {
     // 词库分类
     private List<GroupConfig> groups;
 
+    // 默认初始展示数量
+    private int initialDisplaySize = 20;
+
+    // 默认每次点击加载数量
+    private int loadMoreStep = 40;
+
     @Data
     public static class GroupConfig {
         private String name;

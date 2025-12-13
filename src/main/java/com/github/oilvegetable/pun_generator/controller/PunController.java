@@ -1,5 +1,6 @@
 package com.github.oilvegetable.pun_generator.controller;
 
+import com.github.oilvegetable.pun_generator.config.PunProperties;
 import com.github.oilvegetable.pun_generator.service.PunService;
 import com.github.oilvegetable.pun_generator.vo.PunResult;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -17,6 +18,8 @@ public class PunController {
 
     @Autowired
     private PunService punService;
+    @Autowired
+    private PunProperties punProperties;
 
     // 获取分类菜单
     @GetMapping("/categories")
@@ -32,6 +35,15 @@ public class PunController {
     @GetMapping("/types-default")
     public List<String> getDefaultTypes() {
         return punService.getDefaultSelectedTypes();
+    }
+
+    @GetMapping("/config")
+    public Map<String, Integer> getConfig() {
+        // 返回配置给前端，对应 index.html 中的 fetchUiConfig
+        return Map.of(
+                "initial", punProperties.getInitialDisplaySize(),
+                "step", punProperties.getLoadMoreStep()
+        );
     }
 
     // 生成
