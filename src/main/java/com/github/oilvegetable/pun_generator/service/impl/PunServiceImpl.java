@@ -7,8 +7,8 @@ import cn.hutool.json.JSONArray;
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
 import com.github.oilvegetable.pun_generator.config.PunProperties;
-import com.github.oilvegetable.pun_generator.vo.PunResult;
 import com.github.oilvegetable.pun_generator.service.PunService;
+import com.github.oilvegetable.pun_generator.vo.PunResult;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import net.sourceforge.pinyin4j.PinyinHelper;
@@ -37,7 +37,8 @@ public class PunServiceImpl implements PunService {
         String type;
         String extra;
         int frequency;
-        List<String> pinyins;
+        // 集合是为了处理多音字
+        List<Set<String>> pinyins;
     }
 
     @Data
@@ -92,7 +93,6 @@ public class PunServiceImpl implements PunService {
         typePriorityMap.clear();
 
         // 2. 初始化优先级映射
-        // 如果配置文件里配了 search-order，就用配置的；否则默认优先级为 MAX_VALUE (排在最后)
         List<String> orderConfig = punProperties.getSearchOrder();
         if (orderConfig != null) {
             for (int i = 0; i < orderConfig.size(); i++) {
@@ -128,9 +128,7 @@ public class PunServiceImpl implements PunService {
 
     @Override
     public List<String> getAllTypesOrdered() {
-        // 复制一份所有类型
         List<String> sortedTypes = new ArrayList<>(allTypes);
-        // 按照 typePriorityMap 进行排序
         sortedTypes.sort(Comparator.comparingInt(t -> typePriorityMap.getOrDefault(t, Integer.MAX_VALUE)));
         return sortedTypes;
     }
@@ -147,7 +145,6 @@ public class PunServiceImpl implements PunService {
                 ? new ArrayList<>(allTypes)
                 : new ArrayList<>(targetTypes);
 
-        // 规则：配置了优先级的按配置走，没配置的按默认顺序排在后面
         searchTypes.sort(Comparator.comparingInt(t -> typePriorityMap.getOrDefault(t, Integer.MAX_VALUE)));
 
         for (String type : searchTypes) {
@@ -155,17 +152,21 @@ public class PunServiceImpl implements PunService {
         }
 
         if (inputWord == null || inputWord.isEmpty()) return resultMap;
-        List<String> inputPinyins = getStringPinyins(inputWord);
+
+        List<Set<String>> inputPinyins = getStringPinyins(inputWord);
         if (inputPinyins.isEmpty()) return resultMap;
 
         // 1. 粗筛
         Set<DictItem> candidates = new HashSet<>();
-        for (String py : inputPinyins) {
-            if (invertedIndex.containsKey(py)) {
-                Set<DictItem> items = invertedIndex.get(py);
-                for (DictItem item : items) {
-                    if (resultMap.containsKey(item.getType())) { // 注意：Lombok生成的Getter是 getType()
-                        candidates.add(item);
+        for (Set<String> pinyinSet : inputPinyins) {
+            // 输入字的任何一个读音匹配上，都把该词条拉入候选
+            for (String py : pinyinSet) {
+                if (invertedIndex.containsKey(py)) {
+                    Set<DictItem> items = invertedIndex.get(py);
+                    for (DictItem item : items) {
+                        if (resultMap.containsKey(item.getType())) {
+                            candidates.add(item);
+                        }
                     }
                 }
             }
@@ -278,26 +279,35 @@ public class PunServiceImpl implements PunService {
     }
 
     private void addToIndex(String text, String type, String extra, int frequency) {
-        List<String> pinyins = getStringPinyins(text);
-        if (pinyins.isEmpty()) return;
-        DictItem item = new DictItem(text, type, extra, frequency, pinyins);
-        for (String py : pinyins) {
-            invertedIndex.computeIfAbsent(py, k -> new HashSet<>()).add(item);
+        // 获取该词所有汉字的所有拼音组合
+        List<Set<String>> pinyinsList = getStringPinyins(text);
+        if (pinyinsList.isEmpty()) return;
+
+        DictItem item = new DictItem(text, type, extra, frequency, pinyinsList);
+
+        // 将该 Item 注册到它包含的所有拼音下
+        for (Set<String> pinyinSet : pinyinsList) {
+            for (String py : pinyinSet) {
+                invertedIndex.computeIfAbsent(py, k -> new HashSet<>()).add(item);
+            }
         }
     }
 
-    // 有序匹配
-    private MatchResult calculateOrderedMatch(String inputWord, List<String> inputPinyins, DictItem item) {
-        List<String> idiomPinyins = item.getPinyins();
+    private MatchResult calculateOrderedMatch(String inputWord, List<Set<String>> inputPinyins, DictItem item) {
+        List<Set<String>> idiomPinyins = item.getPinyins();
         if (idiomPinyins.size() < inputPinyins.size()) return null;
 
         int bestScore = -1;
         List<Integer> bestIndices = null;
         List<Integer> startPositions = new ArrayList<>();
 
-        String firstPy = inputPinyins.get(0);
+        // 寻找可能的起始点：输入的第一个字的拼音集合 vs 词条第i个字的拼音集合
+        Set<String> firstInputPySet = inputPinyins.get(0);
         for (int i = 0; i < idiomPinyins.size(); i++) {
-            if (idiomPinyins.get(i).equals(firstPy)) startPositions.add(i);
+            // 判断两个集合是否有交集
+            if (!Collections.disjoint(idiomPinyins.get(i), firstInputPySet)) {
+                startPositions.add(i);
+            }
         }
 
         for (int startIdx : startPositions) {
@@ -308,13 +318,16 @@ public class PunServiceImpl implements PunService {
             int currentScore = 10;
 
             for (int k = 1; k < inputPinyins.size(); k++) {
-                String targetPy = inputPinyins.get(k);
+                Set<String> targetPySet = inputPinyins.get(k);
                 int foundAt = -1;
+
+                // 在剩余部分寻找匹配
                 for (int m = currentIdiomSearchIdx; m < idiomPinyins.size(); m++) {
-                    if (idiomPinyins.get(m).equals(targetPy)) {
+                    if (!Collections.disjoint(idiomPinyins.get(m), targetPySet)) {
                         foundAt = m; break;
                     }
                 }
+
                 if (foundAt != -1) {
                     currentIndices.add(foundAt);
                     currentScore += 10;
@@ -335,21 +348,18 @@ public class PunServiceImpl implements PunService {
         return new MatchResult(finalPun, bestScore, bestIndices);
     }
 
-    // 无序匹配
-    private MatchResult calculateUnorderedMatch(String inputWord, List<String> inputPinyins, DictItem item) {
-        List<String> idiomPinyins = item.getPinyins();
+    private MatchResult calculateUnorderedMatch(String inputWord, List<Set<String>> inputPinyins, DictItem item) {
+        List<Set<String>> idiomPinyins = item.getPinyins();
         if (idiomPinyins.size() < inputPinyins.size()) return null;
 
         List<Integer> resultIndices = new ArrayList<>();
-        // 使用一个标记数组，防止同一个位置被重复使用
         boolean[] used = new boolean[idiomPinyins.size()];
         int score = 0;
 
-        // 贪心匹配：为每一个输入拼音找到第一个未使用的匹配项
-        for (String inputPy : inputPinyins) {
+        for (Set<String> inputPySet : inputPinyins) {
             int foundAt = -1;
             for (int i = 0; i < idiomPinyins.size(); i++) {
-                if (!used[i] && idiomPinyins.get(i).equals(inputPy)) {
+                if (!used[i] && !Collections.disjoint(idiomPinyins.get(i), inputPySet)) {
                     foundAt = i;
                     break;
                 }
@@ -358,14 +368,12 @@ public class PunServiceImpl implements PunService {
             if (foundAt != -1) {
                 used[foundAt] = true;
                 resultIndices.add(foundAt);
-                score += 10; // 基础分
+                score += 10;
             } else {
-                // 如果有一个拼音找不到，说明无法构成谐音，直接失败
                 return null;
             }
         }
 
-        // 构造结果
         String finalPun = constructPlainString(inputWord, item.getText(), resultIndices);
         return new MatchResult(finalPun, score, resultIndices);
     }
@@ -381,12 +389,27 @@ public class PunServiceImpl implements PunService {
         return sb.toString();
     }
 
-    private List<String> getStringPinyins(String str) {
-        List<String> list = new ArrayList<>();
+    // 获取字符的所有无声调拼音并去重
+    private List<Set<String>> getStringPinyins(String str) {
+        List<Set<String>> list = new ArrayList<>();
         for (char c : str.toCharArray()) {
+            Set<String> pinyinSet = new HashSet<>();
             String[] pinyins = null;
-            try { pinyins = PinyinHelper.toHanyuPinyinStringArray(c); } catch (Exception e) {}
-            if (pinyins != null && pinyins.length > 0) list.add(pinyins[0].replaceAll("\\d", ""));
+            try {
+                pinyins = PinyinHelper.toHanyuPinyinStringArray(c);
+            } catch (Exception e) {}
+
+            if (pinyins != null && pinyins.length > 0) {
+                for (String py : pinyins) {
+                    // 去除声调数字，并加入集合去重
+                    pinyinSet.add(py.replaceAll("\\d", ""));
+                }
+            } else {
+                // 这里暂时忽略，如果完全没拼音就不加，但在上层调用会判断 size
+            }
+            if (!pinyinSet.isEmpty()) {
+                list.add(pinyinSet);
+            }
         }
         return list;
     }
