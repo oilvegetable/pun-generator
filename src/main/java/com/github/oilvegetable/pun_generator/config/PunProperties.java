@@ -26,6 +26,9 @@ public class PunProperties {
     // 默认每次点击加载数量
     private int loadMoreStep = 40;
 
+    // 最低匹配字符数
+    private int minMatchCount = 2;
+
     @Data
     public static class GroupConfig {
         private String name;

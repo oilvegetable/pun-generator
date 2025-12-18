@@ -17,6 +17,7 @@ import org.springframework.stereotype.Service;
 
 import jakarta.annotation.PostConstruct;
 import java.util.*;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Service
@@ -30,6 +31,9 @@ public class PunServiceImpl implements PunService {
     private final Set<String> allTypes = new LinkedHashSet<>();
     private final Map<String, Integer> typePriorityMap = new HashMap<>();
 
+    // 预编译正则，优化性能，防止内存溢出
+    private static final Pattern TONE_PATTERN = Pattern.compile("\\d");
+
     @Data
     @AllArgsConstructor
     private static class DictItem {
@@ -37,7 +41,6 @@ public class PunServiceImpl implements PunService {
         String type;
         String extra;
         int frequency;
-        // 集合是为了处理多音字
         List<Set<String>> pinyins;
     }
 
@@ -45,6 +48,7 @@ public class PunServiceImpl implements PunService {
     @AllArgsConstructor
     private static class MatchResult {
         String finalPun;
+        int matchCount;
         int score;
         List<Integer> indices;
     }
@@ -53,22 +57,32 @@ public class PunServiceImpl implements PunService {
     private static class MergedResult {
         String finalPun;
         List<Integer> indices;
+        int maxMatchCount;
         int maxScore;
         int maxFrequency;
         Set<String> originTexts = new LinkedHashSet<>();
 
-        public MergedResult(String finalPun, List<Integer> indices, int score, int frequency, String originText) {
+        public MergedResult(String finalPun, List<Integer> indices, int matchCount, int score, int frequency, String originText) {
             this.finalPun = finalPun;
             this.indices = indices;
+            this.maxMatchCount = matchCount;
             this.maxScore = score;
             this.maxFrequency = frequency;
             this.originTexts.add(originText);
         }
 
-        public void addOrigin(String originText, int score, int frequency) {
+        public void addOrigin(String originText, int matchCount, int score, int frequency) {
             this.originTexts.add(originText);
-            this.maxScore = Math.max(this.maxScore, score);
-            this.maxFrequency = Math.max(this.maxFrequency, frequency);
+            // 优先保留匹配字数更多的
+            if (matchCount > this.maxMatchCount) {
+                this.maxMatchCount = matchCount;
+                this.maxScore = score;
+                this.maxFrequency = frequency;
+                this.indices = null; // indices 会随 finalPun 改变，这里简化处理，通常取高分者的
+            } else if (matchCount == this.maxMatchCount) {
+                this.maxScore = Math.max(this.maxScore, score);
+                this.maxFrequency = Math.max(this.maxFrequency, frequency);
+            }
         }
 
         public PunResult toPunResult() {
@@ -153,26 +167,34 @@ public class PunServiceImpl implements PunService {
 
         if (inputWord == null || inputWord.isEmpty()) return resultMap;
 
+        // 获取多音字组合
         List<Set<String>> inputPinyins = getStringPinyins(inputWord);
         if (inputPinyins.isEmpty()) return resultMap;
 
-        // 1. 粗筛
+        // 1. 确定最低匹配数
+        // 比如输入"已生一世" (4字), 配置min=2, 则limit=2
+        // 比如输入"啊" (1字), 配置min=2, 则limit=1 (取最小值)
+        int minLimit = Math.min(inputPinyins.size(), punProperties.getMinMatchCount());
+
+        // 2. 候选集筛选 (使用Set去重)
         Set<DictItem> candidates = new HashSet<>();
         for (Set<String> pinyinSet : inputPinyins) {
-            // 输入字的任何一个读音匹配上，都把该词条拉入候选
             for (String py : pinyinSet) {
                 if (invertedIndex.containsKey(py)) {
                     Set<DictItem> items = invertedIndex.get(py);
                     for (DictItem item : items) {
-                        if (resultMap.containsKey(item.getType())) {
-                            candidates.add(item);
-                        }
+                        // 类型过滤
+                        if (!resultMap.containsKey(item.getType())) continue;
+                        // 长度剪枝：如果词条拼音数 < minLimit，绝对无法匹配成功，直接丢弃
+                        if (item.getPinyins().size() < minLimit) continue;
+
+                        candidates.add(item);
                     }
                 }
             }
         }
 
-        // 2. 细算
+        // 3. 细算与合并
         Map<String, Map<String, MergedResult>> tempGroupedMap = new HashMap<>();
         for (String type : searchTypes) {
             tempGroupedMap.put(type, new HashMap<>());
@@ -181,9 +203,9 @@ public class PunServiceImpl implements PunService {
         for (DictItem item : candidates) {
             MatchResult match;
             if (ignoreOrder) {
-                match = calculateUnorderedMatch(inputWord, inputPinyins, item);
+                match = calculateUnorderedMatch(inputWord, inputPinyins, item, minLimit);
             } else {
-                match = calculateOrderedMatch(inputWord, inputPinyins, item);
+                match = calculateOrderedMatch(inputWord, inputPinyins, item, minLimit);
             }
 
             if (match != null) {
@@ -195,6 +217,7 @@ public class PunServiceImpl implements PunService {
 
                     if ("歇后语".equals(item.getType()) && StrUtil.isNotBlank(item.getExtra())) {
                         String prefix = item.getExtra() + "——";
+                        // 歇后语也需要把前缀加回去
                         fullPunDisplay = prefix + match.getFinalPun();
                         fullOriginText = prefix + item.getText();
                         int offset = prefix.length();
@@ -202,25 +225,42 @@ public class PunServiceImpl implements PunService {
                     }
 
                     if (group.containsKey(fullPunDisplay)) {
-                        group.get(fullPunDisplay).addOrigin(fullOriginText, match.getScore(), item.getFrequency());
+                        group.get(fullPunDisplay).addOrigin(fullOriginText, match.getMatchCount(), match.getScore(), item.getFrequency());
                     } else {
-                        group.put(fullPunDisplay, new MergedResult(fullPunDisplay, finalIndices, match.getScore(), item.getFrequency(), fullOriginText));
+                        // 【调用修复】参数顺序严格对应构造函数
+                        group.put(fullPunDisplay, new MergedResult(
+                                fullPunDisplay,     // String
+                                finalIndices,       // List
+                                match.getMatchCount(), // int
+                                match.getScore(),      // int
+                                item.getFrequency(),   // int
+                                fullOriginText         // String
+                        ));
                     }
                 }
             }
         }
 
-        // 3. 排序
+        // 4. 排序
         for (String type : searchTypes) {
             Map<String, MergedResult> punMap = tempGroupedMap.get(type);
             if (punMap == null || punMap.isEmpty()) continue;
 
             List<MergedResult> list = new ArrayList<>(punMap.values());
             list.sort((r1, r2) -> {
-                if (Math.abs(r1.getMaxScore() - r2.getMaxScore()) > 15) return r2.getMaxScore() - r1.getMaxScore();
+                // 优先级1: 匹配字数 (越多越好)
+                if (r1.getMaxMatchCount() != r2.getMaxMatchCount()) {
+                    return r2.getMaxMatchCount() - r1.getMaxMatchCount();
+                }
+                // 优先级2: 分数 (越高越好)
+                if (Math.abs(r1.getMaxScore() - r2.getMaxScore()) > 10) {
+                    return r2.getMaxScore() - r1.getMaxScore();
+                }
+                // 优先级3: 词频 (越高越好)
                 return r2.getMaxFrequency() - r1.getMaxFrequency();
             });
 
+            // 不再 limit(20)，全部返回给前端分页
             List<PunResult> resultList = list.stream()
                     .map(MergedResult::toPunResult)
                     .collect(Collectors.toList());
@@ -228,6 +268,110 @@ public class PunServiceImpl implements PunService {
         }
         return resultMap;
     }
+
+    // ----------------- 核心算法区 -----------------
+
+    /**
+     * 有序匹配 (支持跳字匹配，替换字符)
+     */
+    private MatchResult calculateOrderedMatch(String inputWord, List<Set<String>> inputPinyins, DictItem item, int minLimit) {
+        List<Set<String>> dictPinyins = item.getPinyins();
+        MatchResult bestMatch = null;
+
+        for (int i = 0; i < inputPinyins.size(); i++) {
+            List<Integer> currentIndices = new ArrayList<>();
+            Map<Integer, Character> replacementMap = new HashMap<>();
+
+            int currentDictIdx = 0;
+            int matchCount = 0;
+            int score = 0;
+
+            for (int j = i; j < inputPinyins.size(); j++) {
+                Set<String> inPy = inputPinyins.get(j);
+                int foundAt = -1;
+                for (int k = currentDictIdx; k < dictPinyins.size(); k++) {
+                    if (!Collections.disjoint(dictPinyins.get(k), inPy)) {
+                        foundAt = k;
+                        break;
+                    }
+                }
+
+                if (foundAt != -1) {
+                    matchCount++;
+                    currentIndices.add(foundAt);
+                    // 记录替换：字典第 foundAt 个字 -> 输入的第 j 个字
+                    replacementMap.put(foundAt, inputWord.charAt(j));
+
+                    score += 10;
+                    if (currentIndices.size() > 1 && foundAt == currentIndices.get(currentIndices.size() - 2) + 1) {
+                        score += 20; // 连贯加分
+                    }
+                    currentDictIdx = foundAt + 1;
+                }
+            }
+
+            if (matchCount >= minLimit) {
+                if (bestMatch == null || matchCount > bestMatch.getMatchCount() || (matchCount == bestMatch.getMatchCount() && score > bestMatch.getScore())) {
+                    String finalPun = constructPlainString(item.getText(), replacementMap);
+                    bestMatch = new MatchResult(finalPun, matchCount, score, new ArrayList<>(currentIndices));
+                }
+            }
+        }
+        return bestMatch;
+    }
+
+    /**
+     * 无序匹配 (贪心算法，替换字符)
+     */
+    private MatchResult calculateUnorderedMatch(String inputWord, List<Set<String>> inputPinyins, DictItem item, int minLimit) {
+        List<Set<String>> dictPinyins = item.getPinyins();
+        List<Integer> resultIndices = new ArrayList<>();
+        Map<Integer, Character> replacementMap = new HashMap<>();
+        boolean[] usedDict = new boolean[dictPinyins.size()];
+        int matchCount = 0;
+        int score = 0;
+
+        for (int j = 0; j < inputPinyins.size(); j++) {
+            Set<String> inPy = inputPinyins.get(j);
+            for (int k = 0; k < dictPinyins.size(); k++) {
+                if (!usedDict[k] && !Collections.disjoint(dictPinyins.get(k), inPy)) {
+                    usedDict[k] = true;
+                    resultIndices.add(k);
+                    replacementMap.put(k, inputWord.charAt(j));
+                    matchCount++;
+                    score += 10;
+                    break;
+                }
+            }
+        }
+
+        if (matchCount >= minLimit) {
+            Collections.sort(resultIndices);
+            String finalPun = constructPlainString(item.getText(), replacementMap);
+            return new MatchResult(finalPun, matchCount, score, resultIndices);
+        }
+        return null;
+    }
+
+    /**
+     * 字符串替换工具：将 itemText 中被匹配的字替换为 input 中的字
+     */
+    private String constructPlainString(String originText, Map<Integer, Character> replacementMap) {
+        if (replacementMap == null || replacementMap.isEmpty()) {
+            return originText;
+        }
+        StringBuilder sb = new StringBuilder(originText);
+        for (Map.Entry<Integer, Character> entry : replacementMap.entrySet()) {
+            int index = entry.getKey();
+            char newChar = entry.getValue();
+            if (index >= 0 && index < sb.length()) {
+                sb.setCharAt(index, newChar);
+            }
+        }
+        return sb.toString();
+    }
+
+    // ----------------- 加载与工具区 -----------------
 
     private void loadJsonNormal(PunProperties.DictConfig config) {
         try {
@@ -279,13 +423,10 @@ public class PunServiceImpl implements PunService {
     }
 
     private void addToIndex(String text, String type, String extra, int frequency) {
-        // 获取该词所有汉字的所有拼音组合
         List<Set<String>> pinyinsList = getStringPinyins(text);
         if (pinyinsList.isEmpty()) return;
 
         DictItem item = new DictItem(text, type, extra, frequency, pinyinsList);
-
-        // 将该 Item 注册到它包含的所有拼音下
         for (Set<String> pinyinSet : pinyinsList) {
             for (String py : pinyinSet) {
                 invertedIndex.computeIfAbsent(py, k -> new HashSet<>()).add(item);
@@ -293,103 +434,6 @@ public class PunServiceImpl implements PunService {
         }
     }
 
-    private MatchResult calculateOrderedMatch(String inputWord, List<Set<String>> inputPinyins, DictItem item) {
-        List<Set<String>> idiomPinyins = item.getPinyins();
-        if (idiomPinyins.size() < inputPinyins.size()) return null;
-
-        int bestScore = -1;
-        List<Integer> bestIndices = null;
-        List<Integer> startPositions = new ArrayList<>();
-
-        // 寻找可能的起始点：输入的第一个字的拼音集合 vs 词条第i个字的拼音集合
-        Set<String> firstInputPySet = inputPinyins.get(0);
-        for (int i = 0; i < idiomPinyins.size(); i++) {
-            // 判断两个集合是否有交集
-            if (!Collections.disjoint(idiomPinyins.get(i), firstInputPySet)) {
-                startPositions.add(i);
-            }
-        }
-
-        for (int startIdx : startPositions) {
-            List<Integer> currentIndices = new ArrayList<>();
-            currentIndices.add(startIdx);
-            int currentIdiomSearchIdx = startIdx + 1;
-            boolean possible = true;
-            int currentScore = 10;
-
-            for (int k = 1; k < inputPinyins.size(); k++) {
-                Set<String> targetPySet = inputPinyins.get(k);
-                int foundAt = -1;
-
-                // 在剩余部分寻找匹配
-                for (int m = currentIdiomSearchIdx; m < idiomPinyins.size(); m++) {
-                    if (!Collections.disjoint(idiomPinyins.get(m), targetPySet)) {
-                        foundAt = m; break;
-                    }
-                }
-
-                if (foundAt != -1) {
-                    currentIndices.add(foundAt);
-                    currentScore += 10;
-                    if (foundAt == currentIndices.get(currentIndices.size() - 2) + 1) currentScore += 20;
-                    currentIdiomSearchIdx = foundAt + 1;
-                } else {
-                    possible = false; break;
-                }
-            }
-            if (possible && currentScore > bestScore) {
-                bestScore = currentScore;
-                bestIndices = new ArrayList<>(currentIndices);
-            }
-        }
-
-        if (bestIndices == null) return null;
-        String finalPun = constructPlainString(inputWord, item.getText(), bestIndices);
-        return new MatchResult(finalPun, bestScore, bestIndices);
-    }
-
-    private MatchResult calculateUnorderedMatch(String inputWord, List<Set<String>> inputPinyins, DictItem item) {
-        List<Set<String>> idiomPinyins = item.getPinyins();
-        if (idiomPinyins.size() < inputPinyins.size()) return null;
-
-        List<Integer> resultIndices = new ArrayList<>();
-        boolean[] used = new boolean[idiomPinyins.size()];
-        int score = 0;
-
-        for (Set<String> inputPySet : inputPinyins) {
-            int foundAt = -1;
-            for (int i = 0; i < idiomPinyins.size(); i++) {
-                if (!used[i] && !Collections.disjoint(idiomPinyins.get(i), inputPySet)) {
-                    foundAt = i;
-                    break;
-                }
-            }
-
-            if (foundAt != -1) {
-                used[foundAt] = true;
-                resultIndices.add(foundAt);
-                score += 10;
-            } else {
-                return null;
-            }
-        }
-
-        String finalPun = constructPlainString(inputWord, item.getText(), resultIndices);
-        return new MatchResult(finalPun, score, resultIndices);
-    }
-
-
-    private String constructPlainString(String inputWord, String itemText, List<Integer> indices) {
-        StringBuilder sb = new StringBuilder(itemText);
-        for (int k = 0; k < indices.size(); k++) {
-            if (k < inputWord.length()) {
-                sb.setCharAt(indices.get(k), inputWord.charAt(k));
-            }
-        }
-        return sb.toString();
-    }
-
-    // 获取字符的所有无声调拼音并去重
     private List<Set<String>> getStringPinyins(String str) {
         List<Set<String>> list = new ArrayList<>();
         for (char c : str.toCharArray()) {
@@ -401,11 +445,10 @@ public class PunServiceImpl implements PunService {
 
             if (pinyins != null && pinyins.length > 0) {
                 for (String py : pinyins) {
-                    // 去除声调数字，并加入集合去重
-                    pinyinSet.add(py.replaceAll("\\d", ""));
+                    // 优化：intern() 复用字符串，降低内存
+                    String clearPy = TONE_PATTERN.matcher(py).replaceAll("").intern();
+                    pinyinSet.add(clearPy);
                 }
-            } else {
-                // 这里暂时忽略，如果完全没拼音就不加，但在上层调用会判断 size
             }
             if (!pinyinSet.isEmpty()) {
                 list.add(pinyinSet);
